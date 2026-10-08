@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material You Dynamic System Colors (Android 12+ / API 31+) - Dark Theme -->
+    <color name="launcher_bg_start">@android:color/system_accent1_800</color>
+    <color name="launcher_bg_mid">@android:color/system_neutral1_900</color>
+    <color name="launcher_bg_end">@android:color/system_accent1_1000</color>
+
+    <!-- Document Card: Elevated dark surface container -->
+    <color name="launcher_card_surface">@android:color/system_neutral1_800</color>
+    <color name="launcher_card_shadow">#80000000</color>
+
+    <!-- Top Clip: Vibrant dynamic accent -->
+    <color name="launcher_clip">@android:color/system_accent1_700</color>
+    <color name="launcher_clip_accent">@android:color/system_accent1_300</color>
+
+    <!-- Markdown 'M' and '↓' Primary Symbol: Glowing light accent -->
+    <color name="launcher_primary_symbol">@android:color/system_accent1_200</color>
+
+    <!-- Syntax indication lines: Secondary accents -->
+    <color name="launcher_line_primary">@android:color/system_accent2_300</color>
+    <color name="launcher_line_secondary">@android:color/system_accent2_400</color>
+    <color name="launcher_line_tertiary">@android:color/system_accent2_600</color>
+
+    <!-- Transformation sparkle badge: Tertiary dynamic accent -->
+    <color name="launcher_sparkle">@android:color/system_accent3_300</color>
+    <color name="launcher_sparkle_accent">@android:color/system_accent3_100</color>
+</resources>

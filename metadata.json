@@ -1,0 +1,6 @@
+{
+  "name": "Paste to Markdown",
+  "description": "Quickly convert rich text and HTML from your clipboard into plain Markdown. An alternative to clipboard2markdown for mobile.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
