@@ -17,8 +17,10 @@ android {
     applicationId = "com.aistudio.pastetomarkdown.xzyqwe"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    // Overridable from the command line (e.g. ./gradlew -PversionCode=2 -PversionName=1.1)
+    // so the release pipeline can set versions without editing this file.
+    versionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 1
+    versionName = (project.findProperty("versionName") as? String) ?: "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -26,10 +28,18 @@ android {
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val storePassword = System.getenv("STORE_PASSWORD")
+      val keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+      val keyPassword = System.getenv("KEY_PASSWORD")
+      // Only configure signing when the keystore credentials are available
+      // (e.g. injected by the release pipeline from GitHub secrets). Without
+      // them, release builds are produced unsigned instead of failing.
+      if (!storePassword.isNullOrBlank() && !keyPassword.isNullOrBlank()) {
+        this.storeFile = file(keystorePath)
+        this.storePassword = storePassword
+        this.keyAlias = keyAlias
+        this.keyPassword = keyPassword
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -44,7 +54,13 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      // Sign only when keystore credentials are present (see signingConfigs);
+      // otherwise the release build is unsigned.
+      signingConfig = if (!System.getenv("STORE_PASSWORD").isNullOrBlank()) {
+        signingConfigs.getByName("release")
+      } else {
+        null
+      }
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")

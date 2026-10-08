@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.1.0 (a tag v1.1.0 is created automatically)'
+        required: true
+        type: string
+      release_notes:
+        description: 'Release notes in Markdown (leave empty to auto-generate a changelog from commits)'
+        required: false
+        type: string
+      draft:
+        description: 'Create the release as a draft'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark the release as a prerelease'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign & publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Injected into the Gradle build (see app/build.gradle.kts). These are
+      # empty when the corresponding secrets are not configured, in which case
+      # the pipeline produces an unsigned release build.
+      STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so the changelog can be computed against the previous tag.
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          VERSION="${VERSION#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.+-]+)?$'; then
+            echo "::error::Version '$VERSION' is not valid. Use a semver-like value such as 1.2.3."
+            exit 1
+          fi
+          # Derive a monotonic integer versionCode, e.g. 1.2.3 -> 10203
+          VERSION_CODE=$(printf '%s' "$VERSION" | sed 's/-.*//' | awk -F. '{c=0; for (i=1;i<=NF;i++) c=c*100+($i+0); print c}')
+          {
+            echo "version=${VERSION}"
+            echo "version-code=${VERSION_CODE}"
+            echo "tag=v${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v${VERSION} (versionCode ${VERSION_CODE})"
+
+      - name: Prepare build environment
+        run: |
+          # Ensure .env exists for the Secrets Gradle plugin
+          touch .env
+          # Restore the debug keystore from debug.keystore.base64 when present,
+          # otherwise generate one so the debug variant can be built in CI.
+          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkeypair -storetype JKS -keystore debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
+          chmod +x gradlew
+
+      - name: Configure release signing
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
+              echo "::error::KEYSTORE_BASE64 is set but STORE_PASSWORD or KEY_PASSWORD is missing. Configure all keystore secrets together (see RELEASE.md)."
+              exit 1
+            fi
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            chmod 600 my-upload-key.jks
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Release build will be signed with my-upload-key.jks (alias: ${KEY_ALIAS:-upload})"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No KEYSTORE_BASE64 secret configured - the release build will be UNSIGNED. See RELEASE.md to enable signing."
+          fi
+
+      - name: Run unit tests
+        run: ./gradlew assembleDebug testDebugUnitTest --continue --stacktrace
+
+      - name: Build release APK and AAB
+        run: |
+          ./gradlew \
+            -PversionName="${{ steps.version.outputs.version }}" \
+            -PversionCode="${{ steps.version.outputs.version-code }}" \
+            assembleRelease bundleRelease --stacktrace
+
+      - name: Check build outputs
+        run: |
+          ls -lh app/build/outputs/apk/release/ app/build/outputs/bundle/release/
+          test -n "$(ls app/build/outputs/apk/release/*.apk 2>/dev/null)"
+          test -n "$(ls app/build/outputs/bundle/release/*.aab 2>/dev/null)"
+
+      - name: Verify APK signature
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          CERT=$(unzip -Z1 "$APK" | grep -E 'META-INF/CERT\.(RSA|EC|DSA)$' | head -n 1)
+          if [ -z "$CERT" ]; then
+            echo "No embedded certificate found in $APK - the APK is not signed."
+            exit 1
+          fi
+          unzip -p "$APK" "$CERT" > /tmp/release-cert.der
+          keytool -printcert -file /tmp/release-cert.der
+
+      - name: Generate release notes
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          NOTES_FILE=release-notes.md
+          if [ -n "$RELEASE_NOTES" ]; then
+            printf '%s\n' "$RELEASE_NOTES" > "$NOTES_FILE"
+          else
+            {
+              echo "## What's Changed"
+              echo
+              PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+              if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$GITHUB_REF_NAME" ]; then
+                git log --no-merges --pretty=format:"- %s (%h)" "${PREV_TAG}..${GITHUB_REF_NAME}"
+                echo
+              else
+                git log --no-merges --pretty=format:"- %s (%h)" | head -n 30
+                echo
+              fi
+            } > "$NOTES_FILE"
+          fi
+          echo "----- release notes -----"
+          cat "$NOTES_FILE"
+
+      - name: Remove existing release for tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          EXISTING=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Deleting existing release for ${TAG} so this run can re-publish it."
+            gh api -X DELETE "repos/${{ github.repository }}/releases/${EXISTING}"
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: v${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          draft: ${{ github.event.inputs.draft }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
